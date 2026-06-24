@@ -19,3 +19,14 @@ frontend/dist/
 .pytest_cache/
 .mypy_cache/
 *.mp4
+
+# Test videos
+tests/*.mp4
+
+# Output and uploads
+output/
+uploads/
+
+# PyTorch models (large files)
+models/*.pth
+models/*.onnx*

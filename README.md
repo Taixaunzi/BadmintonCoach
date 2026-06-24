@@ -8,32 +8,34 @@
 
 ## ✨ 功能
 
-| 功能 | 说明 |
-|------|------|
-| 🦴 骨骼标定 | RTMPose 实时标注17个关键点 |
-| 🏸 球体追踪 | TrackNet 热力图追踪羽毛球（亚像素精度） |
-| 📊 运动参数 | 关节角度、手腕速度、身体倾斜 |
-| ⚠️ 问题检测 | 关节角度超标、动作偏差自动标记 |
-| 🌟 精彩捕捉 | 高速挥拍、极限救球自动识别 |
-| 🎬 慢放回放 | 问题/精彩片段 4倍慢放 + 文字说明 |
-| 🤖 AI教练 | OpenAI兼容API，支持任意LLM |
-| 🌐 Web界面 | Vue 3 深色主题，拖拽上传 + 结果浏览 |
+| 功能 | 说明 | 技术 |
+|------|------|------|
+| 🦴 骨骼标定 | 17关键点实时标注 | RTMPose (rtmlib) |
+| 🏸 球体追踪 | 羽毛球检测+轨迹+速度 | TrackNet 深度学习 |
+| 📊 运动参数 | 关节角度、手腕速度、身体倾斜 | NumPy + SciPy |
+| ⚠️ 问题检测 | 关节角度超标、动作偏差 | 滑窗聚合+状态机 |
+| 🌟 精彩捕捉 | 高速挥拍、极限救球 | 多条件联合判定 |
+| 🎬 慢镜头回放 | 问题/精彩片段4倍慢放 | OpenCV |
+| 🤖 AI教练 | OpenAI兼容API教练建议 | LLM (任意兼容API) |
+| 🌐 Web界面 | 拖拽上传+结果浏览+LLM对话 | Vue 3 + FastAPI |
+| 🎾 运动员过滤 | 球场检测+球拍识别+身高评分 | HSV+形状分析 |
+| ⚡ GPU加速 | CUDA/MPS/ONNX/TensorRT | PyTorch/ONNX Runtime |
 
 ## 🏗️ 技术栈
 
 ```
-后端: FastAPI + Python 3.10+
-前端: Vue 3 + Vite + TypeScript + Pinia
-骨骼: RTMPose (rtmlib, ONNX)
-球追踪: TrackNet (热力图, 3帧输入)
-视频: OpenCV
-LLM: OpenAI兼容API（用户自配）
-部署: Docker Compose
+后端:   FastAPI + Python 3.10+
+前端:   Vue 3 + Vite + TypeScript + Pinia
+骨骼:   RTMPose (rtmlib, ONNX Runtime)
+球追踪: TrackNet (PyTorch/ONNX, 3帧热力图)
+视频:   OpenCV + PIL (中文渲染)
+LLM:    OpenAI兼容API (用户自配)
+部署:   Docker Compose
 ```
 
 ## 🚀 快速开始
 
-### 方式一：Docker Compose（推荐）
+### Docker Compose（推荐）
 
 ```bash
 git clone https://github.com/Taixaunzi/BadmintonCoach.git
@@ -44,98 +46,107 @@ vim config.yaml  # 设置 llm.api_key
 
 # 一键启动
 docker-compose up -d
-
 # 访问 http://localhost:3000
 ```
 
-### 方式二：本地开发
+### 本地开发
 
 ```bash
 # 后端
 pip install -r requirements.txt
 python -m uvicorn badmintoncoach.server:app --reload --port 8000
 
-# 前端（另一个终端）
-cd frontend
-npm install
-npm run dev
+# 前端
+cd frontend && npm install && npm run dev
 
 # 访问 http://localhost:3000
+```
+
+### GPU加速
+
+```bash
+# 检测GPU
+python -m badmintoncoach.tools.gpu_utils
+
+# NVIDIA GPU加速
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install onnxruntime-gpu
+
+# config.yaml
+# pose.device: cuda
+# ball.device: cuda
 ```
 
 ## 📁 项目结构
 
 ```
 BadmintonCoach/
-├── badmintoncoach/             # Python后端包
+├── badmintoncoach/             # Python后端
 │   ├── server.py               # FastAPI入口
-│   ├── config.py               # 配置管理
-│   ├── api/                    # REST API路由
+│   ├── config.py               # 配置管理 (YAML)
+│   ├── api/                    # REST API
 │   │   ├── upload.py           # 视频上传
 │   │   ├── analysis.py         # 分析触发/状态/结果
 │   │   ├── files.py            # 文件下载
 │   │   └── ws.py               # WebSocket进度
 │   ├── engine/                 # 分析引擎
 │   │   ├── pipeline.py         # 分析管道编排
-│   │   ├── pose_estimator.py   # RTMPose封装
-│   │   ├── ball_tracker.py     # TrackNet封装
+│   │   ├── pose_estimator.py   # RTMPose + 运动员过滤
+│   │   ├── ball_tracker.py     # TrackNet球追踪
+│   │   ├── racket_detector.py  # 球拍检测
 │   │   ├── param_extractor.py  # 关节角度/速度
-│   │   ├── event_detector.py   # 问题/精彩检测
-│   │   ├── annotator.py        # 视频标注
-│   │   └── slowmo.py           # 慢镜头生成
+│   │   ├── event_detector.py   # 滑窗+状态机事件检测
+│   │   ├── annotator.py        # 视频标注 (中文HUD)
+│   │   ├── slowmo.py           # 慢镜头生成
+│   │   └── tracknet_model.py   # TrackNet模型定义
 │   ├── llm/                    # LLM集成
 │   │   ├── client.py           # OpenAI兼容客户端
-│   │   └── prompts.py          # Prompt模板
-│   └── models/                 # 数据模型
-│       ├── schemas.py          # Pydantic schemas
-│       └── enums.py            # 枚举定义
+│   │   └── prompts.py          # Skill Router Prompt
+│   ├── models/                 # 数据模型
+│   │   ├── schemas.py          # Pydantic schemas
+│   │   └── enums.py            # 枚举定义
+│   └── tools/                  # 工具
+│       └── gpu_utils.py        # GPU检测+ONNX导出
 ├── frontend/                   # Vue 3 前端
-│   ├── src/
-│   │   ├── views/              # 页面组件
-│   │   ├── components/         # 通用组件
-│   │   ├── stores/             # Pinia状态
-│   │   └── api/                # API客户端
-│   └── vite.config.ts
-├── models/                     # 预训练模型（ONNX）
-├── tests/                      # 测试
+│   └── src/
+│       ├── views/              # 上传/分析/设置页面
+│       ├── stores/             # Pinia状态管理
+│       └── api/                # API客户端
+├── models/                     # 预训练模型
+│   ├── tracknet_best.pth       # TrackNet PyTorch权重
+│   └── tracknet_best.onnx      # TrackNet ONNX模型
+├── tests/                      # 单元测试
 ├── docs/                       # 设计文档
 ├── config.yaml                 # 配置文件
 ├── Dockerfile                  # 后端镜像
 ├── Dockerfile.frontend         # 前端镜像
-├── docker-compose.yml          # 编排文件
-└── nginx.conf                  # Nginx配置
+├── docker-compose.yml          # 编排
+├── nginx.conf                  # Nginx反代
+├── requirements.txt            # Python依赖
+└── LICENSE                     # MIT
 ```
 
 ## ⚙️ 配置
 
-编辑 `config.yaml`：
-
 ```yaml
-# 姿态估计
+# config.yaml
 pose:
-  mode: "balanced"         # lightweight / balanced / performance
-  device: "cpu"            # cpu / cuda（有GPU用cuda）
+  mode: "balanced"           # lightweight / balanced / performance
+  backend: "onnxruntime"     # onnxruntime / tensorrt
+  device: "cpu"              # cpu / cuda / mps
 
-# 球体追踪
 ball:
-  confidence_threshold: 0.3
+  model_path: "./models/tracknet_best.pth"
+  device: "auto"             # auto / cpu / cuda / mps
 
-# 事件检测阈值
 events:
-  angle_ranges:
-    left_elbow: [90, 170]
-    right_elbow: [90, 170]
-    left_knee: [100, 170]
-    right_knee: [100, 170]
-  highlight_thresholds:
-    wrist_speed_max: 1500
-    body_lean_max: 35
+  sport: "badminton"
+  angle_ranges:              # 关节角度正常范围
+    left_elbow: [15, 175]
+    right_elbow: [15, 175]
+    left_knee: [50, 175]
+    right_knee: [50, 175]
 
-# 慢放设置
-slowmo:
-  factor: 0.25             # 0.25 = 4倍慢放
-
-# LLM配置（支持任意OpenAI兼容API）
 llm:
   base_url: "https://api.openai.com/v1"
   api_key: "sk-..."
@@ -144,15 +155,15 @@ llm:
 
 ## 📊 分析输出
 
-| 输出文件 | 说明 |
-|---------|------|
-| `full_analysis.mp4` | 原速视频 + 骨骼/球标注 + 指标HUD |
-| `problems_slowmo.mp4` | 问题片段 4倍慢放 + 说明 + 改进建议 |
-| `highlights_slowmo.mp4` | 精彩瞬间 4倍慢放 |
-| `report.json` | 结构化运动参数 + 事件列表 |
-| `coaching.md` | LLM教练建议全文 |
+| 文件 | 说明 |
+|------|------|
+| `full_analysis.mp4` | 标注视频（骨骼+球轨迹+速度+中文HUD） |
+| `problems_slowmo.mp4` | 问题片段4倍慢放+时间戳 |
+| `highlights_slowmo.mp4` | 精彩瞬间4倍慢放+时间戳 |
+| `report.json` | 结构化运动参数+事件列表 |
+| `coaching.md` | LLM教练建议 |
 
-## 🔌 API 端点
+## 🔌 API端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -168,12 +179,18 @@ llm:
 ## 🧪 测试
 
 ```bash
-# 运行全部测试
 python -m pytest tests/ -v
-
-# 运行特定测试
-python -m pytest tests/test_param_extractor.py -v
 ```
+
+## 📹 视频要求
+
+| 要求 | 说明 |
+|------|------|
+| ✅ 近距离拍摄 | 运动员身高占画面>25% |
+| ✅ 固定机位 | 球场边固定摄像头 |
+| ✅ 光线充足 | 球场灯光均匀 |
+| ❌ 广播远景 | 运动员太小，骨架不准 |
+| ❌ 频繁切换 | 镜头切换导致追踪丢失 |
 
 ## 🤝 贡献
 
@@ -189,7 +206,7 @@ MIT License - 详见 [LICENSE](LICENSE)
 
 ## 🙏 致谢
 
-- [MMPose](https://github.com/open-mmlab/mmpose) - RTMPose姿态估计
-- [rtmlib](https://github.com/Tau-J/rtlib) - 轻量RTMPose推理
-- [TrackNet](https://github.com/yastrebksv/TrackNet) - 球体追踪
+- [MMPose/rtmlib](https://github.com/open-mmlab/mmpose) - RTMPose姿态估计
+- [TrackNet](https://github.com/yastrebksv/TrackNet) - 羽毛球追踪模型
 - [Ultralytics](https://github.com/ultralytics/ultralytics) - YOLO系列
+- [Talking Tennis](https://arxiv.org/abs/2510.03921) - LLM运动教练反馈研究
