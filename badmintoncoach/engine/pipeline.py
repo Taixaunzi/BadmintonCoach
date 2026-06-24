@@ -53,6 +53,8 @@ class AnalysisPipeline:
         # Step 1: 逐帧分析（骨骼 + 球 + 参数）
         notify(AnalysisStatus.POSE, 0.0, "骨骼姿态估计中...")
         frames_data: list[FrameData] = []
+        ball_positions: list = []
+        ball_speeds: list[float] = []
         prev_kpts: Optional[np.ndarray] = None
 
         for i in range(total):
@@ -65,8 +67,11 @@ class AnalysisPipeline:
             kpt = kpts[0] if len(kpts) > 0 else np.zeros((17, 2))
             sc = scores[0] if len(scores) > 0 else np.zeros(17)
 
-            # 球
+            # 球追踪
             ball_pos = self.ball(frame)
+            ball_state = self.ball.get_state(i)
+            ball_positions.append(ball_pos)
+            ball_speeds.append(ball_state.speed_kmh)
 
             # 参数
             angles = extract_joint_angles(kpt, sc)
@@ -99,7 +104,7 @@ class AnalysisPipeline:
         # Step 3: 标注视频
         notify(AnalysisStatus.ANNOTATING, 0.6, "生成标注视频...")
         full_path = str(Path(output_dir) / "full_analysis.mp4")
-        annotate_video(video_path, full_path, frames_data)
+        annotate_video(video_path, full_path, frames_data, ball_positions, ball_speeds)
 
         # Step 4: 慢镜头
         notify(AnalysisStatus.SLOWMO, 0.8, "生成慢镜头...")
