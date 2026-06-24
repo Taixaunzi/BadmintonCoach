@@ -10,6 +10,7 @@ from ..engine.pipeline import AnalysisPipeline
 from ..llm.client import CoachLLM
 from ..models.enums import AnalysisStatus
 from ..models.schemas import AnalysisProgress
+from .ws import broadcast_progress
 
 router = APIRouter()
 config = load_config()
@@ -57,6 +58,18 @@ async def _run_analysis(video_id: str, input_path: str, output_dir: str):
             task["status"] = prog.status
             task["progress"] = prog.progress
             task["message"] = prog.message
+            # WebSocket广播（忽略错误，无连接时不影响分析）
+            try:
+                import asyncio as _aio
+                loop = _aio.get_event_loop()
+                if loop.is_running():
+                    _aio.ensure_future(broadcast_progress(video_id, {
+                        "status": prog.status.value if isinstance(prog.status, AnalysisStatus) else prog.status,
+                        "progress": prog.progress,
+                        "message": prog.message,
+                    }))
+            except Exception:
+                pass
 
         # 在线程池中运行（CPU密集型）
         pipeline = AnalysisPipeline(config)

@@ -37,8 +37,10 @@ class AnalysisPipeline:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 30.0  # 默认30fps
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total / fps if fps > 0 else 0
+        duration = total / fps
 
         def notify(status: AnalysisStatus, prog: float, msg: str = ""):
             if progress_callback:

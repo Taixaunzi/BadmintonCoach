@@ -12,9 +12,11 @@ class CoachLLM:
     """OpenAI兼容的教练LLM客户端"""
 
     def __init__(self, config: LLMConfig):
+        if not config.api_key:
+            raise ValueError("LLM API Key 未配置，请在 config.yaml 或设置页面配置")
         self.client = AsyncOpenAI(
             base_url=config.base_url,
-            api_key=config.api_key or "sk-placeholder",
+            api_key=config.api_key,
         )
         self.model = config.model
         self.temperature = config.temperature
