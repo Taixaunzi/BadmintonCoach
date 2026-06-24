@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from ..config import PoseConfig
+from .racket_detector import RacketDetector
 
 
 class CourtDetector:
@@ -58,6 +59,7 @@ class PoseEstimator:
         self.config = config
         self._tracker = None
         self.court_detector = CourtDetector()
+        self.racket_detector = RacketDetector()
 
     def _init_tracker(self):
         if self._tracker is not None:
@@ -89,7 +91,7 @@ class PoseEstimator:
             return all_kpts, all_scores
 
         # Step 3: 评分选出场上运动员
-        player_indices = self._score_players(all_kpts, all_scores, court_mask, h, w)
+        player_indices = self._score_players(all_kpts, all_scores, court_mask, h, w, frame)
 
         if not player_indices:
             player_indices = [0]  # fallback
@@ -101,15 +103,15 @@ class PoseEstimator:
 
     def _score_players(
         self, kpts: np.ndarray, scores: np.ndarray,
-        court_mask: np.ndarray, h: int, w: int
+        court_mask: np.ndarray, h: int, w: int, frame: np.ndarray
     ) -> List[int]:
         """对每个人评分，选出最可能是场上运动员的人
 
         评分维度：
-        1. 身高占比（站着的运动员 > 坐着的观众）
-        2. 身体中心在球场区域内
-        3. 身体中心在画面中下部（球场区域）
-        4. 关键点置信度
+        1. 球拍（最重要：拿球拍的人几乎一定是运动员）
+        2. 身高占比（站着的运动员 > 坐着的观众）
+        3. 身体中心在球场区域内
+        4. 位置（画面中下部）
         """
         court_bbox = self.court_detector._court_bbox
         if court_bbox:
@@ -142,10 +144,14 @@ class PoseEstimator:
             body_area = body_height * body_width
             mean_conf = float(vs.mean())
 
-            # 1. 身高占比分（0-1）：越高越好，观众坐着通常<15%
+            # 0. 球拍检测（最重要）
+            has_racket = self.racket_detector.has_racket(frame, kpt, sc)
+            racket_score = 1.0 if has_racket else 0.0
+
+            # 1. 身高占比分（0-1）
             height_score = min(1.0, height_ratio / 0.25)
 
-            # 2. 球场内分（0或1）：身体中心在球场掩码内
+            # 2. 球场内分（0或1）
             ix, iy = int(body_cx), int(body_cy)
             if 0 <= ix < w and 0 <= iy < h:
                 in_court = court_mask[iy, ix] > 0
@@ -153,24 +159,23 @@ class PoseEstimator:
                 in_court = False
             court_score = 1.0 if in_court else 0.0
 
-            # 3. 位置分（0-1）：越接近球场中央越好
-            # 球场通常在画面中下部
+            # 3. 位置分（0-1）
             if court_top <= body_cy <= court_bottom:
-                # 在球场垂直范围内
                 dist_from_center = abs(body_cy - court_center_y) / (court_bottom - court_top) * 2
                 position_score = max(0, 1.0 - dist_from_center)
             else:
                 position_score = 0.0
 
-            # 4. 面积分（0-1）：身体面积越大越好
+            # 4. 面积分（0-1）
             area_score = min(1.0, body_area / (w * h * 0.05))
 
-            # 综合评分
+            # 综合评分：球拍权重最高
             total = (
-                height_score * 0.35 +   # 身高最重要
-                court_score * 0.25 +     # 球场内
-                position_score * 0.25 +  # 位置
-                area_score * 0.15        # 面积
+                racket_score * 0.50 +    # 球拍最重要
+                height_score * 0.20 +    # 身高
+                court_score * 0.15 +     # 球场内
+                position_score * 0.10 +  # 位置
+                area_score * 0.05        # 面积
             )
 
             scored.append((i, total, height_score, court_score, position_score, area_score))
@@ -188,3 +193,4 @@ class PoseEstimator:
     def reset(self):
         self._tracker = None
         self.court_detector = CourtDetector()
+        self.racket_detector = RacketDetector()
