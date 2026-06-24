@@ -1,11 +1,36 @@
-"""慢镜头生成"""
+"""慢镜头生成（支持中文）"""
 from typing import List
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from ..config import SlowmoConfig
 from ..models.schemas import TimelineEvent
+
+
+def _get_font(size=24):
+    """获取中文字体"""
+    font_paths = [
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    ]
+    for fp in font_paths:
+        try:
+            return ImageFont.truetype(fp, size)
+        except (OSError, IOError):
+            continue
+    return ImageFont.load_default()
+
+
+def _put_text_cn(img: np.ndarray, text: str, pos: tuple,
+                 color=(255, 255, 255), size=24) -> np.ndarray:
+    """PIL渲染中文"""
+    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    font = _get_font(size)
+    draw.text(pos, text, fill=color, font=font)
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
 def generate_slowmo_clips(
@@ -34,7 +59,6 @@ def _concat_slowmo(
     config: SlowmoConfig,
 ):
     if not events:
-        # 无事件，创建空占位文件
         writer = cv2.VideoWriter(
             output_path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (640, 480)
         )
@@ -54,11 +78,9 @@ def _concat_slowmo(
         # 标题卡（1.5秒）
         title = np.zeros((h, w, 3), dtype=np.uint8)
         color = (0, 0, 255) if ev.event_type.value == "problem" else (0, 200, 255)
-        label = "问题" if ev.event_type.value == "problem" else "精彩"
+        label = "⚠ 问题" if ev.event_type.value == "problem" else "★ 精彩"
         text = f"{label}: {ev.description[:30]}"
-        cv2.putText(
-            title, text, (w // 6, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2
-        )
+        title = _put_text_cn(title, text, (w // 6, h // 2), color, 28)
         for _ in range(int(out_fps * 1.5)):
             writer.write(title)
 
@@ -68,29 +90,15 @@ def _concat_slowmo(
             ret, frame = cap.read()
             if not ret:
                 break
-            # 叠加文字
+            # 半透明叠加条
             overlay = frame.copy()
             cv2.rectangle(overlay, (0, 0), (w, 50), (0, 0, 0), -1)
             frame = cv2.addWeighted(overlay, 0.5, frame, 0.5, 0)
-            cv2.putText(
-                frame,
-                ev.description[:60],
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-            )
+            # 中文文字
+            frame = _put_text_cn(frame, ev.description[:50], (10, 10), (255, 255, 255), 20)
             if ev.improvement:
-                cv2.putText(
-                    frame,
-                    f"改进: {ev.improvement[:50]}",
-                    (10, h - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    1,
-                )
+                frame = _put_text_cn(frame, f"建议: {ev.improvement[:40]}", 
+                                    (10, h - 35), (0, 255, 0), 18)
             writer.write(frame)
 
     writer.release()
