@@ -94,12 +94,9 @@ class PoseEstimator:
         if not player_indices:
             player_indices = [0]  # fallback
 
-        # 取前2人（支持双打）
-        if len(player_indices) > 2:
-            player_indices = player_indices[:2]
-
-        selected_kpts = np.array([all_kpts[i] for i in player_indices])
-        selected_scores = np.array([all_scores[i] for i in player_indices])
+        # 只取前1人（单打模式，避免标注混乱）
+        selected_kpts = all_kpts[player_indices[0]:player_indices[0]+1]
+        selected_scores = all_scores[player_indices[0]:player_indices[0]+1]
         return selected_kpts, selected_scores
 
     def _score_players(
