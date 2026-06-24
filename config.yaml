@@ -1,0 +1,42 @@
+app:
+  host: "0.0.0.0"
+  port: 8000
+  upload_dir: "./uploads"
+  output_dir: "./output"
+
+pose:
+  mode: "balanced"
+  backend: "onnxruntime"
+  device: "cpu"
+  det_frequency: 10
+  kpt_threshold: 0.43
+
+ball:
+  model_path: "./models/tracknet.onnx"
+  confidence_threshold: 0.3
+
+events:
+  sport: "badminton"
+  angle_ranges:
+    left_elbow: [90, 170]
+    right_elbow: [90, 170]
+    left_knee: [100, 170]
+    right_knee: [100, 170]
+    left_shoulder: [20, 120]
+    right_shoulder: [20, 120]
+  highlight_thresholds:
+    wrist_speed_max: 1500
+    body_lean_max: 35
+    speed_change_rate: 500
+
+slowmo:
+  factor: 0.25
+  pre_event_frames: 30
+  post_event_frames: 30
+
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: ""
+  model: "gpt-4.1-mini"
+  temperature: 0.3
+  max_tokens: 500
