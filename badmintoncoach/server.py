@@ -6,8 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .api.analysis import router as analysis_router
 from .api.files import router as files_router
 from .api.upload import router as upload_router
+from .api.ws import router as ws_router
 from .config import load_config
 
 config = load_config()
@@ -30,6 +32,8 @@ app.mount("/output", StaticFiles(directory=config.app.output_dir), name="output"
 
 app.include_router(upload_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
+app.include_router(analysis_router, prefix="/api")
+app.include_router(ws_router)
 
 
 @app.get("/api/health")
