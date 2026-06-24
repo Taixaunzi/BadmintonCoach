@@ -1,7 +1,7 @@
-"""羽毛球追踪 — HSV检测 + 卡尔曼滤波 + 轨迹/速度计算"""
+"""羽毛球追踪 — 帧差法运动检测 + 颜色筛选 + 卡尔曼滤波"""
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -11,11 +11,10 @@ from ..config import BallConfig
 
 @dataclass
 class BallState:
-    """球的状态"""
-    position: Optional[np.ndarray] = None  # [x, y]
-    velocity: Optional[np.ndarray] = None  # [vx, vy] px/frame
-    speed: float = 0.0                     # px/frame
-    speed_kmh: float = 0.0                 # km/h (估算)
+    position: Optional[np.ndarray] = None
+    velocity: Optional[np.ndarray] = None
+    speed: float = 0.0
+    speed_kmh: float = 0.0
     confidence: float = 0.0
     frame_idx: int = 0
 
@@ -26,138 +25,118 @@ class BallTracker:
     def __init__(self, config: BallConfig):
         self.config = config
         self._kalman: Optional[cv2.KalmanFilter] = None
-        self._trajectory: deque = deque(maxlen=30)  # 最近30帧轨迹
-        self._prev_state: Optional[BallState] = None
-        self._lost_count = 0  # 连续丢失帧数
+        self._trajectory: deque = deque(maxlen=30)
+        self._prev_gray: Optional[np.ndarray] = None
+        self._lost_count = 0
         self._init_kalman()
-
-        # 像素到速度的换算系数（假设球场13.4m长，画面中占600px）
-        # 1px ≈ 0.022m，30fps → 1帧=0.033s
-        # speed_kmh = speed_px * 0.022 / 0.033 * 3.6 ≈ speed_px * 2.4
         self._px_to_kmh = 2.4
 
     def _init_kalman(self):
-        """初始化卡尔曼滤波器"""
-        self._kalman = cv2.KalmanFilter(4, 2)  # 4状态(x,y,vx,vy), 2观测(x,y)
-        self._kalman.measurementMatrix = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-        self._kalman.transitionMatrix = np.array([
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=np.float32)
+        self._kalman = cv2.KalmanFilter(4, 2)
+        self._kalman.measurementMatrix = np.array(
+            [[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32
+        )
+        self._kalman.transitionMatrix = np.array(
+            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]],
+            dtype=np.float32,
+        )
         self._kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
         self._kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
 
     def __call__(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """检测单帧球位置
-        Returns:
-            ball_position: [x, y] 或 None
-        """
         detected = self._detect_ball(frame)
 
         if detected is not None:
             self._lost_count = 0
-            # 更新卡尔曼滤波
             self._kalman.correct(np.array(detected, dtype=np.float32))
-            predicted = self._kalman.predict()
-            pos = np.array([predicted[0, 0], predicted[1, 0]])
-            self._trajectory.append(pos.copy())
-            return pos
+            self._kalman.predict()
+            self._trajectory.append(detected.copy())
+            return detected
         else:
             self._lost_count += 1
-            # 用卡尔曼预测（最多预测10帧）
-            if self._lost_count <= 10 and self._kalman is not None:
-                predicted = self._kalman.predict()
-                pos = np.array([predicted[0, 0], predicted[1, 0]])
-                self._trajectory.append(pos.copy())
-                return pos
+            # 不用预测，直接返回None（只信真实检测）
             self._trajectory.append(None)
             return None
 
     def _detect_ball(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """HSV颜色检测羽毛球"""
+        """帧差法检测运动物体 + 颜色筛选羽毛球"""
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Step 1: 帧差法 — 只保留运动区域
+        if self._prev_gray is not None:
+            diff = cv2.absdiff(self._prev_gray, gray)
+            _, motion_mask = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+            # 膨胀运动区域
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            motion_mask = cv2.dilate(motion_mask, kernel, iterations=2)
+        else:
+            motion_mask = np.ones((h, w), dtype=np.uint8) * 255
+        self._prev_gray = gray.copy()
+
+        # Step 2: 颜色检测 — 羽毛球颜色（白色/黄色）
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # 羽毛球颜色：白色/黄色/绿色（鹅毛部分）
-        masks = []
-
-        # 白色球头
-        mask_white = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 50, 255]))
-        masks.append(mask_white)
-
-        # 黄色球头
+        # 白色（球头）
+        mask_white = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 40, 255]))
+        # 黄色（球头）
         mask_yellow = cv2.inRange(hsv, np.array([15, 80, 180]), np.array([35, 255, 255]))
-        masks.append(mask_yellow)
+        color_mask = cv2.bitwise_or(mask_white, mask_yellow)
 
-        # 绿色鹅毛
-        mask_green = cv2.inRange(hsv, np.array([35, 40, 100]), np.array([85, 255, 255]))
-        masks.append(mask_green)
-
-        combined = masks[0]
-        for m in masks[1:]:
-            combined = cv2.bitwise_or(combined, m)
+        # Step 3: 合并 — 运动区域 AND 颜色匹配
+        combined = cv2.bitwise_and(motion_mask, color_mask)
 
         # 形态学去噪
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
 
-        # 找轮廓
+        # Step 4: 找轮廓
         contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             return None
 
-        # 筛选：面积适中、接近圆形
+        # Step 5: 筛选
         candidates = []
         for c in contours:
             area = cv2.contourArea(c)
-            if area < 5 or area > 500:
+            # 羽毛球在画面中通常很小
+            if area < 2 or area > 300:
                 continue
 
-            # 圆度检查
-            perimeter = cv2.arcLength(c, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-            if circularity < 0.3:
-                continue
-
-            # 用卡尔曼预测位置辅助筛选（如果有预测）
             M = cv2.moments(c)
             if M["m00"] == 0:
                 continue
             cx = M["m10"] / M["m00"]
             cy = M["m01"] / M["m00"]
 
+            # 圆度
+            perimeter = cv2.arcLength(c, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+
             # 如果有卡尔曼预测，优先选接近预测位置的
             if self._kalman is not None and self._lost_count < 5:
                 pred_x = self._kalman.statePost[0, 0]
                 pred_y = self._kalman.statePost[1, 0]
-                dist = np.sqrt((cx - pred_x)**2 + (cy - pred_y)**2)
-                if dist > 100:  # 距离预测位置太远，跳过
+                dist = np.sqrt((cx - pred_x) ** 2 + (cy - pred_y) ** 2)
+                if dist > 150:
                     continue
-                score = circularity * 10 - dist * 0.1
+                score = circularity * 10 + area * 0.1 - dist * 0.05
             else:
-                score = circularity * 10
+                score = circularity * 10 + area * 0.1
 
-            candidates.append((cx, cy, score, area))
+            candidates.append((cx, cy, score))
 
         if not candidates:
             return None
 
-        # 选得分最高的
         candidates.sort(key=lambda x: -x[2])
-        best = candidates[0]
-        return np.array([best[0], best[1]])
+        return np.array([candidates[0][0], candidates[0][1]])
 
     def get_state(self, frame_idx: int) -> BallState:
-        """获取当前球状态"""
         pos = self._trajectory[-1] if self._trajectory else None
-
         speed = 0.0
         velocity = None
         if pos is not None and len(self._trajectory) >= 2:
@@ -176,11 +155,10 @@ class BallTracker:
         )
 
     def get_trajectory(self) -> List[Optional[np.ndarray]]:
-        """获取轨迹历史"""
         return list(self._trajectory)
 
     def reset(self):
         self._init_kalman()
         self._trajectory.clear()
-        self._prev_state = None
+        self._prev_gray = None
         self._lost_count = 0
