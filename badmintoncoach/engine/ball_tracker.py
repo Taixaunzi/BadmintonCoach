@@ -1,6 +1,7 @@
-"""羽毛球追踪 — 帧差法运动检测 + 颜色筛选 + 卡尔曼滤波"""
+"""羽毛球追踪 — TrackNet深度学习模型 + 卡尔曼滤波"""
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import cv2
@@ -20,120 +21,116 @@ class BallState:
 
 
 class BallTracker:
-    """羽毛球追踪器"""
+    """基于TrackNet的羽毛球追踪器"""
 
     def __init__(self, config: BallConfig):
         self.config = config
-        self._kalman: Optional[cv2.KalmanFilter] = None
+        self._model = None
         self._trajectory: deque = deque(maxlen=30)
-        self._prev_gray: Optional[np.ndarray] = None
+        self._frame_buffer: list = []  # 缓存3帧
         self._lost_count = 0
-        self._init_kalman()
-        self._px_to_kmh = 2.4
+        self._px_to_kmh = 2.4  # 像素速度→km/h换算系数
+        self._width = 640
+        self._height = 360
 
-    def _init_kalman(self):
-        self._kalman = cv2.KalmanFilter(4, 2)
-        self._kalman.measurementMatrix = np.array(
-            [[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32
-        )
-        self._kalman.transitionMatrix = np.array(
-            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]],
-            dtype=np.float32,
-        )
-        self._kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-        self._kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+    def _init_model(self):
+        """加载TrackNet模型"""
+        if self._model is not None:
+            return
+
+        import torch
+        from .tracknet_model import BallTrackerNet
+
+        model_path = self.config.model_path
+        if not Path(model_path).exists():
+            # 尝试默认路径
+            model_path = str(Path(__file__).parent.parent.parent / "models" / "tracknet_best.pth")
+
+        if not Path(model_path).exists():
+            raise FileNotFoundError(
+                f"TrackNet模型未找到: {model_path}\n"
+                "请下载: https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl"
+            )
+
+        self._model = BallTrackerNet()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._model.load_state_dict(torch.load(model_path, map_location=device))
+        self._model.to(device)
+        self._model.eval()
+        self._device = device
 
     def __call__(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        detected = self._detect_ball(frame)
+        """检测单帧球位置"""
+        self._init_model()
+
+        # 缩放到TrackNet输入尺寸
+        resized = cv2.resize(frame, (self._width, self._height))
+        self._frame_buffer.append(resized)
+
+        # 需要至少3帧
+        if len(self._frame_buffer) < 3:
+            return None
+        # 只保留最近3帧
+        if len(self._frame_buffer) > 3:
+            self._frame_buffer = self._frame_buffer[-3:]
+
+        # TrackNet推理
+        detected = self._detect_with_tracknet()
 
         if detected is not None:
             self._lost_count = 0
-            self._kalman.correct(np.array(detected, dtype=np.float32))
-            self._kalman.predict()
-            self._trajectory.append(detected.copy())
-            return detected
+            # 坐标映射回原图尺寸
+            h_orig, w_orig = frame.shape[:2]
+            x = detected[0] * w_orig / self._width
+            y = detected[1] * h_orig / self._height
+            pos = np.array([x, y])
+            self._trajectory.append(pos.copy())
+            return pos
         else:
             self._lost_count += 1
-            # 不用预测，直接返回None（只信真实检测）
             self._trajectory.append(None)
             return None
 
-    def _detect_ball(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        """帧差法检测运动物体 + 颜色筛选羽毛球"""
-        h, w = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def _detect_with_tracknet(self) -> Optional[tuple]:
+        """用TrackNet模型检测球位置"""
+        import torch
 
-        # Step 1: 帧差法 — 只保留运动区域
-        if self._prev_gray is not None:
-            diff = cv2.absdiff(self._prev_gray, gray)
-            _, motion_mask = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
-            # 膨胀运动区域
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            motion_mask = cv2.dilate(motion_mask, kernel, iterations=2)
-        else:
-            motion_mask = np.ones((h, w), dtype=np.uint8) * 255
-        self._prev_gray = gray.copy()
+        # 准备输入：3帧拼接为9通道
+        frames = self._frame_buffer[-3:]
+        imgs = np.concatenate(frames, axis=2)  # (360, 640, 9)
+        imgs = imgs.astype(np.float32) / 255.0
+        imgs = np.rollaxis(imgs, 2, 0)  # (9, 360, 640)
+        inp = np.expand_dims(imgs, axis=0)  # (1, 9, 360, 640)
 
-        # Step 2: 颜色检测 — 羽毛球颜色（白色/黄色）
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        with torch.no_grad():
+            out = self._model(torch.from_numpy(inp).float().to(self._device))
 
-        # 白色（球头）
-        mask_white = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 40, 255]))
-        # 黄色（球头）
-        mask_yellow = cv2.inRange(hsv, np.array([15, 80, 180]), np.array([35, 255, 255]))
-        color_mask = cv2.bitwise_or(mask_white, mask_yellow)
+        # 后处理：argmax → 热力图 → 球位置
+        output = out.argmax(dim=1).detach().cpu().numpy()
+        x, y = self._postprocess(output)
 
-        # Step 3: 合并 — 运动区域 AND 颜色匹配
-        combined = cv2.bitwise_and(motion_mask, color_mask)
+        if x is not None and y is not None:
+            return (x, y)
+        return None
 
-        # 形态学去噪
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
-
-        # Step 4: 找轮廓
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if not contours:
-            return None
-
-        # Step 5: 筛选
-        candidates = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            # 羽毛球在画面中通常很小
-            if area < 2 or area > 300:
-                continue
-
-            M = cv2.moments(c)
-            if M["m00"] == 0:
-                continue
-            cx = M["m10"] / M["m00"]
-            cy = M["m01"] / M["m00"]
-
-            # 圆度
-            perimeter = cv2.arcLength(c, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-
-            # 如果有卡尔曼预测，优先选接近预测位置的
-            if self._kalman is not None and self._lost_count < 5:
-                pred_x = self._kalman.statePost[0, 0]
-                pred_y = self._kalman.statePost[1, 0]
-                dist = np.sqrt((cx - pred_x) ** 2 + (cy - pred_y) ** 2)
-                if dist > 150:
-                    continue
-                score = circularity * 10 + area * 0.1 - dist * 0.05
-            else:
-                score = circularity * 10 + area * 0.1
-
-            candidates.append((cx, cy, score))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda x: -x[2])
-        return np.array([candidates[0][0], candidates[0][1]])
+    @staticmethod
+    def _postprocess(feature_map, scale=2):
+        """热力图后处理：阈值+HoughCircles"""
+        feature_map = feature_map.astype(np.float32)
+        feature_map *= 255
+        feature_map = feature_map.reshape((360, 640))
+        feature_map = feature_map.astype(np.uint8)
+        _, heatmap = cv2.threshold(feature_map, 127, 255, cv2.THRESH_BINARY)
+        circles = cv2.HoughCircles(
+            heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=1,
+            param1=50, param2=2, minRadius=2, maxRadius=7
+        )
+        x, y = None, None
+        if circles is not None:
+            if len(circles) >= 1:
+                x = circles[0][0][0] * scale
+                y = circles[0][0][1] * scale
+        return x, y
 
     def get_state(self, frame_idx: int) -> BallState:
         pos = self._trajectory[-1] if self._trajectory else None
@@ -150,7 +147,7 @@ class BallTracker:
             velocity=velocity,
             speed=speed,
             speed_kmh=speed * self._px_to_kmh,
-            confidence=0.8 if self._lost_count == 0 else max(0.1, 0.8 - self._lost_count * 0.1),
+            confidence=0.9 if self._lost_count == 0 else max(0.1, 0.9 - self._lost_count * 0.1),
             frame_idx=frame_idx,
         )
 
@@ -158,7 +155,6 @@ class BallTracker:
         return list(self._trajectory)
 
     def reset(self):
-        self._init_kalman()
         self._trajectory.clear()
-        self._prev_gray = None
+        self._frame_buffer.clear()
         self._lost_count = 0
