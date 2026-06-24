@@ -18,15 +18,19 @@ ball:
 events:
   sport: "badminton"
   angle_ranges:
-    left_elbow: [90, 170]
-    right_elbow: [90, 170]
-    left_knee: [100, 170]
-    right_knee: [100, 170]
-    left_shoulder: [20, 120]
-    right_shoulder: [20, 120]
+    # 羽毛球运动中的关节角度范围（比静态站立宽很多）
+    # 肘：击球时可弯到20°，完全伸展时175°
+    left_elbow: [15, 175]
+    right_elbow: [15, 175]
+    # 膝：深蹲可到50°，站立时175°
+    left_knee: [50, 175]
+    right_knee: [50, 175]
+    # 肩：击球时角度变化极大，只标记极端情况
+    left_shoulder: [0, 140]
+    right_shoulder: [0, 140]
   highlight_thresholds:
-    wrist_speed_max: 1500
-    body_lean_max: 35
+    wrist_speed_max: 1500      # 高速挥拍阈值（像素/帧）
+    body_lean_max: 55          # 极限倾斜阈值（提高，35-50°在羽毛球中常见）
     speed_change_rate: 500
 
 slowmo:
