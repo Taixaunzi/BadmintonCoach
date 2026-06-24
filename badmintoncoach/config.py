@@ -24,8 +24,9 @@ class PoseConfig(BaseModel):
 
 
 class BallConfig(BaseModel):
-    model_path: str = "./models/tracknet.onnx"
+    model_path: str = "./models/tracknet_best.pth"
     confidence_threshold: float = 0.3
+    device: str = "auto"  # auto / cpu / cuda / mps
 
 
 class EventConfig(BaseModel):

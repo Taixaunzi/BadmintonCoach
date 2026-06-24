@@ -6,14 +6,15 @@ app:
 
 pose:
   mode: "balanced"
-  backend: "onnxruntime"
-  device: "cpu"
+  backend: "onnxruntime"      # onnxruntime / tensorrt / openvino
+  device: "cpu"               # cpu / cuda / mps
   det_frequency: 10
   kpt_threshold: 0.43
 
 ball:
-  model_path: "./models/tracknet.onnx"
+  model_path: "./models/tracknet_best.pth"
   confidence_threshold: 0.3
+  device: "auto"              # auto / cpu / cuda / mps（auto=有GPU用GPU）
 
 events:
   sport: "badminton"

@@ -1,4 +1,4 @@
-"""羽毛球追踪 — TrackNet深度学习模型 + 卡尔曼滤波"""
+"""羽毛球追踪 — TrackNet + GPU加速 + ONNX推理"""
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,65 +21,134 @@ class BallState:
 
 
 class BallTracker:
-    """基于TrackNet的羽毛球追踪器"""
+    """基于TrackNet的羽毛球追踪器（支持GPU/ONNX加速）"""
 
     def __init__(self, config: BallConfig):
         self.config = config
         self._model = None
+        self._onnx_session = None
         self._trajectory: deque = deque(maxlen=30)
-        self._frame_buffer: list = []  # 缓存3帧
+        self._frame_buffer: list = []
         self._lost_count = 0
-        self._px_to_kmh = 2.4  # 像素速度→km/h换算系数
+        self._px_to_kmh = 2.4
         self._width = 640
         self._height = 360
+        self._device = None
+        self._backend = None  # 'pytorch' or 'onnx'
+
+    def _resolve_device(self) -> str:
+        """解析设备选择"""
+        device = self.config.device
+        if device == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    return "mps"
+            except ImportError:
+                pass
+            return "cpu"
+        return device
 
     def _init_model(self):
-        """加载TrackNet模型"""
-        if self._model is not None:
+        """加载模型（优先ONNX，回退PyTorch）"""
+        if self._model is not None or self._onnx_session is not None:
             return
 
-        import torch
-        from .tracknet_model import BallTrackerNet
+        model_path = Path(self.config.model_path)
+        if not model_path.exists():
+            model_path = Path(__file__).parent.parent.parent / "models" / "tracknet_best.pth"
 
-        model_path = self.config.model_path
-        if not Path(model_path).exists():
-            # 尝试默认路径
-            model_path = str(Path(__file__).parent.parent.parent / "models" / "tracknet_best.pth")
-
-        if not Path(model_path).exists():
+        if not model_path.exists():
             raise FileNotFoundError(
                 f"TrackNet模型未找到: {model_path}\n"
                 "请下载: https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl"
             )
 
+        self._device = self._resolve_device()
+
+        # 尝试ONNX加速
+        onnx_path = model_path.with_suffix(".onnx")
+        if onnx_path.exists():
+            self._load_onnx(onnx_path)
+        else:
+            self._load_pytorch(model_path)
+
+    def _load_pytorch(self, model_path: Path):
+        """加载PyTorch模型"""
+        import torch
+        from .tracknet_model import BallTrackerNet
+
         self._model = BallTrackerNet()
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model.load_state_dict(torch.load(model_path, map_location=device))
-        self._model.to(device)
+        self._model.load_state_dict(
+            torch.load(str(model_path), map_location=self._device, weights_only=True)
+        )
+        self._model.to(self._device)
         self._model.eval()
-        self._device = device
+        self._backend = "pytorch"
+
+    def _load_onnx(self, onnx_path: Path):
+        """加载ONNX模型（更快）"""
+        try:
+            import onnxruntime as ort
+
+            providers = []
+            if self._device == "cuda":
+                providers.append("CUDAExecutionProvider")
+            providers.append("CPUExecutionProvider")
+
+            self._onnx_session = ort.InferenceSession(
+                str(onnx_path), providers=providers
+            )
+            self._backend = "onnx"
+        except ImportError:
+            # onnxruntime未安装，回退PyTorch
+            self._load_pytorch(onnx_path.with_suffix(".pth"))
+
+    def export_onnx(self, output_path: Optional[str] = None) -> str:
+        """导出ONNX模型（一次性操作，后续推理用ONNX加速）"""
+        import torch
+        from .tracknet_model import BallTrackerNet
+
+        model_path = Path(self.config.model_path)
+        if not model_path.exists():
+            model_path = Path(__file__).parent.parent.parent / "models" / "tracknet_best.pth"
+
+        model = BallTrackerNet()
+        model.load_state_dict(
+            torch.load(str(model_path), map_location="cpu", weights_only=True)
+        )
+        model.eval()
+
+        if output_path is None:
+            output_path = str(model_path.with_suffix(".onnx"))
+
+        dummy = torch.randn(1, 9, 360, 640)
+        torch.onnx.export(
+            model, dummy, output_path,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+            opset_version=11,
+        )
+        return output_path
 
     def __call__(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """检测单帧球位置"""
         self._init_model()
 
-        # 缩放到TrackNet输入尺寸
         resized = cv2.resize(frame, (self._width, self._height))
         self._frame_buffer.append(resized)
-
-        # 需要至少3帧
         if len(self._frame_buffer) < 3:
             return None
-        # 只保留最近3帧
         if len(self._frame_buffer) > 3:
             self._frame_buffer = self._frame_buffer[-3:]
 
-        # TrackNet推理
-        detected = self._detect_with_tracknet()
+        detected = self._detect()
 
         if detected is not None:
             self._lost_count = 0
-            # 坐标映射回原图尺寸
             h_orig, w_orig = frame.shape[:2]
             x = detected[0] * w_orig / self._width
             y = detected[1] * h_orig / self._height
@@ -91,31 +160,27 @@ class BallTracker:
             self._trajectory.append(None)
             return None
 
-    def _detect_with_tracknet(self) -> Optional[tuple]:
-        """用TrackNet模型检测球位置"""
-        import torch
-
-        # 准备输入：3帧拼接为9通道
+    def _detect(self) -> Optional[tuple]:
+        """推理"""
         frames = self._frame_buffer[-3:]
-        imgs = np.concatenate(frames, axis=2)  # (360, 640, 9)
-        imgs = imgs.astype(np.float32) / 255.0
-        imgs = np.rollaxis(imgs, 2, 0)  # (9, 360, 640)
-        inp = np.expand_dims(imgs, axis=0)  # (1, 9, 360, 640)
+        imgs = np.concatenate(frames, axis=2).astype(np.float32) / 255.0
+        imgs = np.rollaxis(imgs, 2, 0)
+        inp = np.expand_dims(imgs, axis=0)
 
-        with torch.no_grad():
-            out = self._model(torch.from_numpy(inp).float().to(self._device))
+        if self._backend == "onnx" and self._onnx_session is not None:
+            output = self._onnx_session.run(None, {"input": inp})[0]
+            output = output.argmax(axis=1)
+        else:
+            import torch
+            with torch.no_grad():
+                out = self._model(torch.from_numpy(inp).float().to(self._device))
+                output = out.argmax(dim=1).detach().cpu().numpy()
 
-        # 后处理：argmax → 热力图 → 球位置
-        output = out.argmax(dim=1).detach().cpu().numpy()
-        x, y = self._postprocess(output)
-
-        if x is not None and y is not None:
-            return (x, y)
-        return None
+        return self._postprocess(output)
 
     @staticmethod
     def _postprocess(feature_map, scale=2):
-        """热力图后处理：阈值+HoughCircles"""
+        """热力图后处理"""
         feature_map = feature_map.astype(np.float32)
         feature_map *= 255
         feature_map = feature_map.reshape((360, 640))
@@ -125,12 +190,9 @@ class BallTracker:
             heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=1,
             param1=50, param2=2, minRadius=2, maxRadius=7
         )
-        x, y = None, None
-        if circles is not None:
-            if len(circles) >= 1:
-                x = circles[0][0][0] * scale
-                y = circles[0][0][1] * scale
-        return x, y
+        if circles is not None and len(circles) >= 1:
+            return (circles[0][0][0] * scale, circles[0][0][1] * scale)
+        return None
 
     def get_state(self, frame_idx: int) -> BallState:
         pos = self._trajectory[-1] if self._trajectory else None
@@ -141,11 +203,8 @@ class BallTracker:
             if prev_pos is not None:
                 velocity = pos - prev_pos
                 speed = float(np.linalg.norm(velocity))
-
         return BallState(
-            position=pos,
-            velocity=velocity,
-            speed=speed,
+            position=pos, velocity=velocity, speed=speed,
             speed_kmh=speed * self._px_to_kmh,
             confidence=0.9 if self._lost_count == 0 else max(0.1, 0.9 - self._lost_count * 0.1),
             frame_idx=frame_idx,
@@ -153,6 +212,13 @@ class BallTracker:
 
     def get_trajectory(self) -> List[Optional[np.ndarray]]:
         return list(self._trajectory)
+
+    def get_info(self) -> dict:
+        """返回当前推理后端信息"""
+        return {
+            "backend": self._backend or "not_loaded",
+            "device": self._device or "not_loaded",
+        }
 
     def reset(self):
         self._trajectory.clear()
